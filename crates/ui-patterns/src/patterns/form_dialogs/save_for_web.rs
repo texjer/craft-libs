@@ -139,6 +139,8 @@ craft_ui::words! {
         optimized_box: "saveForWeb.optimizedBox" = "Optimized";
         lossless: "saveForWeb.lossless" = "Lossless";
         embed_profile: "saveForWeb.embedProfile" = "Embed Color Profile";
+        /// Under AVIF's settings: the panes show the image unencoded, and the file has no profile or metadata.
+        avif_note: "saveForWeb.avifNote" = "The preview shows the image before compression. AVIF files carry no color profile or metadata.";
         matte: "saveForWeb.matte" = "Matte";
         matte_hex: "saveForWeb.matteHex" = "Matte color";
         convert_srgb: "saveForWeb.convertSrgb" = "Convert to sRGB";
@@ -573,7 +575,10 @@ pub struct SaveForWebDialog<'a> {
     /// Picks the variant: a raster or a vector document.
     #[prop]
     document: WebDocument,
-    /// The formats the host encodes, in list order.
+    /// The formats the host encodes, in list order; [`WebFormat::STANDARD`] unless set or when empty. The host is only
+    /// asked for these: settings in another format (one remembered from a build that could write it, or an Optimize
+    /// answer's) become JPEG, or the first format offered where JPEG is not, and presets in another format are not
+    /// listed.
     #[prop]
     formats: &'a [WebFormat],
     /// The Color Table list the host offers.
@@ -623,7 +628,7 @@ impl<'a> SaveForWebDialog<'a> {
             view: None,
             frame: None,
             document: WebDocument::default(),
-            formats: &WebFormat::ALL,
+            formats: &WebFormat::STANDARD,
             color_tables: &COLOR_TABLES,
             marks: None,
             optimize: false,
@@ -665,6 +670,7 @@ impl<'a> SaveForWebDialog<'a> {
             ok_label,
             inputs,
         } = self;
+        let formats = WebFormat::offered(formats);
         let mut view_held = view.map(Held::new);
         let mut frame_held = frame.map(Held::new);
         let env = Env::of(ui);
@@ -706,6 +712,7 @@ impl<'a> SaveForWebDialog<'a> {
                     restored = true;
                 }
             }
+            options.keep_to(formats);
             // A measuring run reads the view but never writes it, as `FormDialog` does for its own bind.
             let measuring = crate::runtime::measure::active(ui.ctx());
             if let Some(held) = view_held.as_mut()
@@ -758,6 +765,8 @@ impl<'a> SaveForWebDialog<'a> {
                 live.optimize.answer = None;
             }
             let palette = palette_of(&pictures, live.selected);
+            // An Optimize answer can bring a format of its own.
+            options.keep_to(formats);
             live.apply(&inputs, palette, options, &mut asked);
 
             let mut slice_click = None;
@@ -775,6 +784,7 @@ impl<'a> SaveForWebDialog<'a> {
                         options: &*options,
                         slices,
                         chosen: options.slices.selected(),
+                        formats,
                         browser: &browser_preview,
                         speed: live.speed,
                     };
@@ -831,7 +841,7 @@ impl<'a> SaveForWebDialog<'a> {
             if let Some(request) = asked.color.take() {
                 cx.requests().request_color(request);
             }
-            wanted = Self::wanted(&live, options);
+            wanted = Self::wanted(&live, options, formats);
             live.reported = live.revision;
             *cx.memory::<Live>() = live.clone();
             let accepts = !live.optimize.open;
@@ -968,13 +978,14 @@ pub(crate) fn advance_frame(frame: u32, frames: u32, fps: f32, last: f64, now: f
     ((frame + delta) % frames, now - (elapsed - steps) / fps)
 }
 
-/// 4-Up's two extra panes: JPEG and lossy WebP at half and a quarter of the quality; GIF and PNG-8 at half and a
-/// quarter of the colours; any other format as PNG-8 at 128 colours and GIF at 64 colours.
-pub(crate) fn four_up_variants(settings: &SaveForWebOptions) -> [SaveForWebOptions; 2] {
+/// 4-Up's two extra panes: JPEG, lossy WebP and AVIF at half and a quarter of the quality; GIF and PNG-8 at half and a
+/// quarter of the colours; any other format as PNG-8 at 128 colours and GIF at 64 colours. A pane in a format not among
+/// `formats` shows the settings as they are.
+pub(crate) fn four_up_variants(settings: &SaveForWebOptions, formats: &[WebFormat]) -> [SaveForWebOptions; 2] {
     [2u16, 4].map(|divisor| {
         let mut variant = settings.clone();
         match settings.format {
-            WebFormat::Jpeg | WebFormat::WebP if !(settings.format == WebFormat::WebP && settings.lossless) => {
+            WebFormat::Jpeg | WebFormat::Avif | WebFormat::WebP if !(settings.format == WebFormat::WebP && settings.lossless) => {
                 variant.quality = (f64::from(settings.quality) / f64::from(divisor)).round().max(1.0) as u8;
             }
             WebFormat::Gif | WebFormat::Png8 => {
@@ -985,7 +996,7 @@ pub(crate) fn four_up_variants(settings: &SaveForWebOptions) -> [SaveForWebOptio
                 variant.colors = 256 / divisor;
             }
         }
-        variant
+        if formats.contains(&variant.format) { variant } else { settings.clone() }
     })
 }
 
@@ -996,7 +1007,7 @@ pub(crate) fn download_seconds(bytes: u64, kbps: f64) -> u64 {
 
 impl SaveForWebDialog<'_> {
     /// The panes to encode when the revision changed since the last report.
-    fn wanted(live: &Live, options: &SaveForWebOptions) -> Vec<WantedVariant> {
+    fn wanted(live: &Live, options: &SaveForWebOptions, formats: &[WebFormat]) -> Vec<WantedVariant> {
         if live.revision == live.reported {
             return Vec::new();
         }
@@ -1006,7 +1017,7 @@ impl SaveForWebDialog<'_> {
             wanted.push(WantedVariant { index: 0, request: PreviewRequest::new(revision, options.clone()) });
         }
         if live.view == WebView::FourUp {
-            let [half, quarter] = four_up_variants(options);
+            let [half, quarter] = four_up_variants(options, formats);
             wanted.push(WantedVariant { index: 1, request: PreviewRequest::new(revision, half) });
             wanted.push(WantedVariant { index: 2, request: PreviewRequest::new(revision, quarter) });
         }
