@@ -58,7 +58,9 @@ pub(crate) fn pointer_art(env: &Env, cursor: &PaintedCursor, closed: bool, marks
         PaintedCursor::Tool { icon, hotspot, badge, .. } => {
             let side = env.tokens.size.icon.md;
             let icon = SvgIcon::of(&env.tokens, env.direction, side, icon, Mirror::Auto);
-            tool(&pen, icon, *hotspot, *badge, side);
+            let cursor_pen = cursor_ink(&pen);
+            tool(&cursor_pen, icon, *hotspot, *badge, side);
+            pen.art.replace(cursor_pen.art.into_inner());
         }
         PaintedCursor::Badged { badge, .. } => badge_beside(&pen, *badge),
         PaintedCursor::Turn { toward, .. } => turn(&pen, *toward),
@@ -73,7 +75,9 @@ pub(crate) fn pointer_art(env: &Env, cursor: &PaintedCursor, closed: bool, marks
             // The arrow's icon sits under its body, so it takes the larger size to show past the arrow.
             let side = if *pointer == PointerGlyph::Arrow { env.tokens.size.icon.md } else { env.tokens.size.icon.sm };
             let icon = SvgIcon::of(&env.tokens, env.direction, side, icon, Mirror::Auto);
-            pointer_tool(&pen, *pointer, icon, side, edge, ink);
+            let cursor_pen = cursor_ink(&pen);
+            pointer_tool(&cursor_pen, *pointer, icon, side, edge, ink);
+            pen.art.replace(cursor_pen.art.into_inner());
         }
         // `Hidden` has no marks.
         _ => {}
@@ -130,8 +134,11 @@ const ARROW_TIP_ANGLE: f32 = 11.0 * PI / 8.0;
 const GRAB_TRIANGLE: [[f32; 2]; 3] = [[3.0, -4.0], [8.0, 0.0], [3.0, 4.0]];
 /// The top-left corner of the tool icon beside a crosshair.
 const CROSSHAIR_ICON: [f32; 2] = [10.0, 10.0];
-/// The top-left corner of the tool icon beside an arrow: under the arrow's body, which is drawn over it.
-const ARROW_ICON: [f32; 2] = [6.0, 6.0];
+/// The top-left corner of the tool icon beside an arrow: clear of the arrow's body below right of it, so the two
+/// read as separate shapes with the halo between them.
+const ARROW_ICON: [f32; 2] = [10.0, 12.0];
+/// How far a tool pointer's white halo reaches past its black marks, in hairlines.
+const CURSOR_HALO: f32 = 1.5;
 /// The rotate pointer: radius of its arc, half its sweep in radians, and its segment count.
 const TURN_RADIUS: f32 = 12.0;
 const HALF_SWEEP: f32 = 0.75;
@@ -355,6 +362,12 @@ pub(crate) fn tool(pen: &Pen, icon: Option<SvgIcon>, hotspot: Vec2, badge: Optio
     }
 }
 
+/// The pen of a tool's pointer: black marks on a white halo, as the system's own pointers are, whatever the overlay
+/// colours, carrying on `pen`'s art.
+fn cursor_ink(pen: &Pen) -> Pen {
+    Pen { art: RefCell::new(pen.art.take()), fill: Color32::BLACK, halo: Color32::WHITE, thin: pen.thin * CURSOR_HALO, rtl: pen.rtl }
+}
+
 /// `icon` in `rect` in the mark colour, over copies of it a hairline off in each of eight directions in the halo.
 fn icon_on_halo(pen: &Pen, rect: Rect, icon: SvgIcon) {
     for dx in [-1.0, 0.0, 1.0] {
@@ -461,7 +474,13 @@ pub(crate) fn pointer_tool(pen: &Pen, pointer: PointerGlyph, icon: Option<SvgIco
         icon_on_halo(pen, Rect::from_min_size(v(corner).to_pos2(), Vec2::splat(side)), icon);
     }
     match pointer {
-        PointerGlyph::Arrow => arrow(pen, false, None),
+        // The solid arrow fills with the halo and edges with the mark colour; swapped, it is black edged in white. Its
+        // edge keeps the hairline (only the icon's halo is widened), so the hotspot sits where the plain arrow's does.
+        PointerGlyph::Arrow => {
+            let swapped = Pen { art: RefCell::new(pen.art.take()), fill: pen.halo, halo: pen.fill, thin: pen.thin / CURSOR_HALO, rtl: pen.rtl };
+            arrow(&swapped, false, None);
+            pen.art.replace(swapped.art.into_inner());
+        }
         _ => crosshair(pen, side, width, color),
     }
 }
